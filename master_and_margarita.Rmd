@@ -1,0 +1,184 @@
+---
+title: "Мини-проект по анализу корпуса текстов"
+output: html_notebook
+---
+
+Описание данных: данные содержат собранные в .txt файлы книгу "Мастер и Маргарита", написанного Булгаковым. В данных 4 столбца: 1 столбец - название файла, где содержаться данные, второй столбец - номер главы, третий - название главы, четвертый столбец - текст.
+
+```{r}
+library(tidyverse)
+install.packages("stopwords")   # один раз
+library(stopwords)
+
+data <- read_csv('corpus_chapters.csv') |> 
+  select(-file) 
+
+```
+
+```{r}
+library(tidyverse)
+library(tidytext)
+library(stopwords)  
+library(stringr)
+#токенизация
+stopwords <- stopwords("ru", source = "snowball")
+m_words <- c("это","всё","свой","который","ещё","чтоб","вот", "как", "то","тут","или","того","этот","тот")
+summary <- unique(c(stopwords, m_words))
+
+token_words <- data |>
+  mutate(text=str_replace_all(text, "ё", "е")) |>
+  unnest_tokens(word, text, token = "words", to_lower = TRUE) |>
+  filter(str_detect(word, "^[а-я-]+$")) |>    
+  filter(!word %in% summary, nchar(word) > 2)
+
+# частоты по всему корпусу и главам
+frequencies_1 <- token_words |> count(word, sort = TRUE)
+frequencies_2 <- token_words |> count(chapter, word, sort = TRUE)
+```
+
+Визуализируем топ 20 слов
+```{r}
+library(ggplot2)
+library(forcats)
+
+# список персонажей для выделения
+characters <- c("маргарита","воланд","иван","азазелло",
+                "коровьев","бегемот","пилат","левий")
+
+frequencies_1 |>
+  slice_max(n, n = 20) |>
+  mutate(type = ifelse(word %in% characters, "персонаж", "другое")) |>
+  ggplot(aes(x = fct_reorder(word, n), y = n, fill = type)) +
+  geom_col(color = "darkred", show.legend = FALSE) +
+  coord_flip() +
+  scale_fill_manual(values = c("персонаж" = "firebrick", "другое" = "lightcoral")) +
+  labs(x = NULL, y = "Частота", title = "20 слов по корпусу") +
+  theme_minimal(base_family = "serif") +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5, color = "darkred"),
+    axis.text = element_text(size = 10, color = "darkred"),
+    axis.title = element_text(size = 11, color = "darkred")
+  )
+```
+
+
+RegEx - регулярные выражения упоминания персонажей по главам
+```{r}
+# RegEx
+persons <- c("воланд","маргарит[аиы]","бездомн[а-я]+","берлиоз","понырев","пилат","левий","азазелло","бегемот")
+
+regex <- paste0("\\b(", paste(persons, collapse="|"), ")\\b")
+
+persons_ <- data |>
+  mutate(text_norm = stringr::str_to_lower(stringr::str_replace_all(text, "ё","е")),
+         hits = stringr::str_count(text_norm, regex)) |>
+  select(chapter, hits) |>
+  arrange(desc(hits))
+persons_ |> head(10)
+
+```
+```{r}
+library(quanteda)
+#install.packages("quanteda.textstats")
+library(quanteda.textstats)
+library(widyr)
+# install.packages("igraph")
+library(igraph)
+library(ggraph)
+
+chapters_ <- data |>
+  mutate(ch_num = readr::parse_number(chapter),
+         part = if_else(ch_num <= 16, "первая", "вторая"))
+
+corp <- corpus(chapters_, text_field = "text")
+toks <- tokens(corp, remove_punct = TRUE) |>
+  tokens_tolower() |>
+  tokens_replace(pattern = "ё", replacement = "е") |>
+  tokens_keep(pattern = "^[а-я-]+$", valuetype = "regex") |> 
+  tokens_remove(summary)
+
+dfm_all <- dfm(toks)
+
+# Log-likelihood 
+key_ll <- textstat_keyness(dfm_all, 
+                           target = docvars(dfm_all, "part") == "первая", 
+                           measure = "chi2")
+head(key_ll, 10)
+
+
+# Log-ratio 
+key_lr   <- textstat_keyness(dfm_all, target = docvars(dfm_all, "part") == "первая"
+                             , measure = "lr")
+head(key_lr, 15)
+```
+
+```{r}
+library(tidyverse)
+
+data_g <- key_ll |> slice_head(n = 15)
+
+ggplot(data_g, aes(x = reorder(feature, chi2), y = chi2, fill = ifelse(n_target > n_reference, "первая", "Вторая"))) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  labs(x = NULL, y = "log-likelihood (chi2)",
+       title = "Ключевые слова (LL)")
+
+```
+
+
+
+```{r}
+# семантическая сеть
+library(tidytext)
+library(dplyr)
+library(tidyr)
+library(stringr)
+bigrams <- data |>
+  mutate(text = str_replace_all(text, "ё", "е")) |>
+  unnest_tokens(bigram, text, token = "ngrams", n = 2) |>
+  separate(bigram, c("w1", "w2"), sep = " ") |>
+  filter(
+    str_detect(w1, "^[а-я-]+$"),
+    str_detect(w2, "^[а-я-]+$"),
+    !w1 %in% summary,
+    !w2 %in% summary
+  )
+
+
+edges <- bigrams |>
+  count(w1, w2, sort = TRUE) |>
+  filter(n >= 5)   
+
+# функция для тестирования порогов
+test_thresholds <- function() {
+  thresholds <- c(2, 5, 8, 10, 15, 20, 25)
+  
+  for(thresh in thresholds) {
+    edges_test <- edges |> filter(n >= thresh)
+    
+    cat(sprintf("Порог %2d: %4d связей, %3d уникальных слов | ",
+                thresh, nrow(edges_test), 
+                n_distinct(c(edges_test$w1, edges_test$w2))))
+    
+    if(nrow(edges_test) > 0) {
+      g_test <- graph_from_data_frame(edges_test, directed = FALSE)
+      cat(sprintf("Плотность: %.4f", edge_density(g_test)))
+    }
+    cat("\n")
+  }
+}
+
+test_thresholds()
+
+# граф 
+g <- graph_from_data_frame(edges, directed = FALSE)
+set.seed(30)
+ggraph(g, layout = "fr") +
+  geom_edge_link(alpha=.3) +
+  geom_node_point() +
+  geom_node_text(aes(label = name), repel = TRUE, size = 3) +
+  labs(title = "Семантическая сеть биграмм")
+
+```
+
+
