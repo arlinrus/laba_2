@@ -1,14 +1,16 @@
 ---
 title: "Мини-проект по анализу корпуса текстов"
-output: html_notebook
+output:
+  html_document:
+    df_print: paged
 ---
 
 ```{r message=FALSE}
 # библиотеки
-library(tidyverse)
+library(readr)
 library(stopwords)
+library(tidyverse)
 library(tidytext)
-library(stopwords)  
 library(stringr)
 library(ggplot2)
 library(forcats)
@@ -25,14 +27,14 @@ library(udpipe)
 
 ## Описание данных
 
-Данные содержат собранные в .txt файлы книгу "Мастер и Маргарита", написанного Булгаковым. В данных 4 столбца: 1 столбец - название файла, где содержаться данные, второй столбец - номер главы, третий - название главы, четвертый столбец - текст.
+Данные содержат собранные в txt-файлы книгу "Мастер и Маргарита", написанного Булгаковым. В данных 3 столбца:
+- `chapter_number` - номер главы
+- `chapter_name` - название главы
+- `text` - текст.
 
 ```{r}
-data <- read_csv('corpus_chapters.csv') |>
-  select(-file)
-```
-
-```{r}
+data <- read_csv('corpus_chapters.csv') |> 
+  mutate(part = if_else(chapter_number <= 16, "первая", "вторая"), .before = 1) # добавление колонки с частью книги
 head(data)
 ```
 
@@ -41,17 +43,15 @@ head(data)
 Токенизация, лемматизация
 
 ```{r}
-# загружаем предобученную модель для русского языка (делается один раз)
-# модель сохраняется локально
-ud_model <- udpipe_download_model(language = "russian")
-ud_model <- udpipe_load_model(ud_model$file_model)
+# загружаем предобученную модель для русского языка (модель сохраняется локально)
+ud_model <- udpipe_load_model("russian-gsd-ud-2.5-191206.udpipe")
 ```
 
 ```{r}
 # стоп-слова
 stopwords <- stopwords("ru", source = "snowball")
 m_words <- c("это", "все", "свой", "который", "еще", "чтоб", "вот", "как", "то", "тут", "или", "того", "этот", "тот", "очень", "весь", "стать")
-summary <- unique(c(stopwords, m_words))
+stop_list <- unique(c(stopwords, m_words))
 
 # фильтрация
 token_words <- data |>
@@ -60,31 +60,24 @@ token_words <- data |>
   unnest(anno) |>
   mutate(lemma = str_to_lower(lemma)) |>
   filter(str_detect(lemma, "^[а-я-]+$")) |>
-  filter(!lemma %in% summary, nchar(lemma) > 2)
-
-# частоты по всему корпусу и главам
-frequencies_1 <- token_words |> count(lemma, sort = TRUE)
-frequencies_2 <- token_words |> count(chapter, lemma, sort = TRUE)
+  filter(!lemma %in% stop_list, nchar(lemma) > 2)
 ```
+
+## Частотный анализ
 
 Частота по всему корпусу:
 
 ```{r}
+frequencies_1 <- token_words |> count(lemma, sort = TRUE)
 frequencies_1
-```
-
-Частота по главам:
-
-```{r}
-frequencies_2
 ```
 
 Визуализируем **топ-20 слов**
 
 ```{r}
 # список персонажей для выделения
-characters <- c("маргарита","воланд","иван","азазелло",
-                "коровьев","бегемот","пилат","левий")
+characters <- c("маргарита", "воланд", "иван", "азазелло",
+                "коровьев", "бегемот", "пилат", "левий")
 
 frequencies_1 |>
   slice_max(n, n = 20) |>
@@ -101,60 +94,148 @@ frequencies_1 |>
     axis.title = element_text(size = 11, color = "darkred")
   )
 ```
-RegEx - регулярные выражения упоминания персонажей по главам
+
+Частота по главам:
 
 ```{r}
-# RegEx
-persons <- c("воланд","маргарит[аиы]","бездомн[а-я]+","берлиоз","понырев","пилат","левий","азазелло","бегемот")
+frequencies_2 <- token_words |> count(chapter_number, chapter_name, lemma, sort = TRUE)
+
+frequencies_2 |> 
+  group_by(chapter_number, chapter_name) |>
+  slice_max(n, n = 1) |>
+  ungroup()
+```
+
+## Регулярные выражения 
+
+Подсчет частоты упоминания **всех персонажей** по главам
+
+```{r}
+persons <- c(
+  "воланд[ауом]?|мессир(у|ом)?|профессор(у|ом|а)?",
+  "маргарит[аыуойе]|ма[р]+гарит[аыуойе]",
+  "мастер[ау]?",
+  "иван[ауом]?|бездомн(ый|ого|ому|ым)?|понырев[ау]?",
+  "азазелл[оау]",
+  "коровь[её]в[ау]?|фагот(у|ом|а)?",
+  "бегемот[ауом]?|кот[ауом]?",
+  "пилат[ауом]?|понтий|прокуратор[ауом]?",
+  "иешуа|га-ноцри",
+  "левий|матвей",
+  "берлиоз[ауом]?|михаил[ауом]?|александрович[ауом]?",
+  "латунск[а-я]+",
+  "алоизий|могарыч"
+)
 
 regex <- paste0("\\b(", paste(persons, collapse="|"), ")\\b")
 
 persons_ <- data |>
   mutate(text_norm = stringr::str_to_lower(stringr::str_replace_all(text, "ё","е")),
-         hits = stringr::str_count(text_norm, regex)) |>
-  select(chapter, hits) |>
+         hits = stringr::str_count(text_norm, regex), # частота упоминаний
+         words_total = str_count(text_norm, "\\S+"),
+         hits_norm = hits / words_total * 1000) # частота упоминаний на 1000 слов текста
+
+persons_ |> 
+  select(part, chapter_number, chapter_name, hits, hits_norm) |> 
   arrange(desc(hits))
-persons_ |> head(10)
 ```
 
 ```{r}
-chapters_ <- data |>
-  mutate(ch_num = readr::parse_number(chapter),
-         part = if_else(ch_num <= 16, "первая", "вторая"))
+ggplot(persons_, aes(x = fct_reorder(chapter_name, hits), y = hits, fill = part)) +
+  geom_col(color = "white") +
+  coord_flip() +
+  scale_fill_manual(values = c("первая" = "firebrick", "вторая" = "#009999")) +
+  theme_minimal(base_family = "serif") +
+  labs(x = "Глава", y = "Количество упоминаний", 
+       title = "Упоминания персонажей по главам",
+       fill = "Часть романа") +
+  theme(legend.position = "bottom")
+```
 
-corp <- corpus(chapters_, text_field = "text")
+```{r}
+ggplot(persons_, aes(x = fct_reorder(chapter_name, hits_norm), y = hits_norm, fill = part)) +
+  geom_col(color = "white") +
+  coord_flip() +
+  scale_fill_manual(values = c("первая" = "firebrick", "вторая" = "#009999")) +
+  theme_minimal(base_family = "serif") +
+  labs(x = "Глава", y = "Количество упоминаний на 1000 слов текста", 
+       title = "Упоминания персонажей по главам (нормированное)",
+       fill = "Часть романа") +
+  theme(legend.position = "bottom")
+```
+
+## Log-likelihood / log-ratio
+
+```{r}
+# Создаем корпус и документ-термин матрицу
+corp <- corpus(data, text_field = "text")
 toks <- tokens(corp, remove_punct = TRUE) |>
   tokens_tolower() |>
   tokens_replace(pattern = "ё", replacement = "е") |>
-  tokens_keep(pattern = "^[а-я-]+$", valuetype = "regex") |> 
-  tokens_remove(summary)
+  tokens_keep(pattern = "^[а-я-]+$", valuetype = "regex") |>
+  tokens_remove(stop_list)
 
 dfm_all <- dfm(toks)
 
-# Log-likelihood 
+# Добавляем метаданные о частях романа
+docvars(dfm_all, "part") <- data$part
+
+# Log-likelihood анализ
 key_ll <- textstat_keyness(dfm_all, 
-                           target = docvars(dfm_all, "part") == "первая", 
-                           measure = "chi2")
-head(key_ll, 10)
-
-
-# Log-ratio 
-key_lr   <- textstat_keyness(dfm_all, target = docvars(dfm_all, "part") == "первая"
-                             , measure = "lr")
-head(key_lr, 15)
+                          target = docvars(dfm_all, "part") == "первая", 
+                          measure = "chi2")
+head(key_ll, 15)
 ```
 
 ```{r}
-data_g <- key_ll |> slice_head(n = 15)
+# Визуализация Log-likelihood (топ-15 слов для каждой части)
+key_ll_top <- bind_rows(
+  key_ll |> filter(chi2 > 0) |> slice_max(chi2, n = 15),  # слова для первой части
+  key_ll |> filter(chi2 < 0) |> slice_min(chi2, n = 15)   # слова для второй части
+) |>
+  mutate(type = ifelse(chi2 > 0, "первая часть", "вторая часть"))
 
-ggplot(data_g, aes(x = reorder(feature, chi2), y = chi2, fill = ifelse(n_target > n_reference, "первая", "Вторая"))) +
-  geom_col(show.legend = FALSE) +
+ggplot(key_ll_top, aes(x = fct_reorder(feature, chi2), y = chi2, fill = type)) +
+  geom_col(show.legend = TRUE) +
   coord_flip() +
-  labs(x = NULL, y = "log-likelihood (chi2)",
-       title = "Ключевые слова (LL)")
+  scale_fill_manual(values = c("первая часть" = "firebrick", "вторая часть" = "#009999")) +
+  labs(x = NULL, y = "Log-likelihood (chi2)",
+       title = "Ключевые слова по частям романа (Log-likelihood)",
+       fill = "Часть романа") +
+  theme_minimal(base_family = "serif") +
+  theme(legend.position = "bottom")
 ```
 
 ```{r}
+# Log-ratio анализ - получаем результаты для обеих частей
+key_lr <- textstat_keyness(dfm_all, 
+                          target = docvars(dfm_all, "part") == "первая",
+                          measure = "lr")
+head(key_lr, 20)
+```
+
+```{r}
+# Визуализация Log-ratio (топ-15 слов для каждой части)
+key_lr_top <- bind_rows(
+  key_lr |> filter(G2 > 0) |> slice_max(G2, n = 15),  # слова для первой части
+  key_lr |> filter(G2 < 0) |> slice_min(G2, n = 15)   # слова для второй части
+) |>
+  mutate(type = ifelse(G2 > 0, "первая часть", "вторая часть"))
+
+ggplot(key_lr_top, aes(x = fct_reorder(feature, G2), y = G2, fill = type)) +
+  geom_col(show.legend = TRUE) +
+  coord_flip() +
+  scale_fill_manual(values = c("первая часть" = "firebrick", "вторая часть" = "#009999")) +
+  labs(x = NULL, y = "Log-ratio (G2)",
+       title = "Ключевые слова по частям романа (Log-ratio)",
+       fill = "Часть романа") +
+  theme_minimal(base_family = "serif") +
+  theme(legend.position = "bottom")
+```
+
+## Семантическая сеть
+
+```{r warning=FALSE}
 # семантическая сеть
 
 bigrams <- data |>
@@ -164,8 +245,8 @@ bigrams <- data |>
   filter(
     str_detect(w1, "^[а-я-]+$"),
     str_detect(w2, "^[а-я-]+$"),
-    !w1 %in% summary,
-    !w2 %in% summary
+    !w1 %in% stop_list,
+    !w2 %in% stop_list
   )
 
 edges <- bigrams |>
@@ -202,4 +283,3 @@ ggraph(g, layout = "fr") +
   geom_node_text(aes(label = name), repel = TRUE, size = 3) +
   labs(title = "Семантическая сеть биграмм")
 ```
-
