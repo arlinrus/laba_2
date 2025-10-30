@@ -7,33 +7,37 @@ output:
 
 ```{r message=FALSE}
 # библиотеки
-library(readr)
-library(stopwords)
 library(tidyverse)
-library(tidytext)
-library(stringr)
-library(ggplot2)
-library(forcats)
-library(quanteda)
-library(quanteda.textstats)
-library(widyr)
-library(igraph)
-library(ggraph)
 library(dplyr)
+library(ggplot2)
 library(tidyr)
+library(readr)
+library(stringr)
+library(forcats)
+library(purrr)
+
+library(tidytext)
+library(stopwords)
 # install.packages("udpipe")
 library(udpipe)
+library(topicmodels)
+library(quanteda)
+library(quanteda.textstats)
+
+library(widyr)
+library(ggraph)
+library(igraph)
 ```
 
 ## Описание данных
 
-Данные содержат собранные в txt-файлы книгу "Мастер и Маргарита", написанного Булгаковым. В данных 3 столбца:
+Данные содержат собранные в txt-файлы книгу "Мастер и Маргарита", написанную Булгаковым. В данных 3 столбца:
 - `chapter_number` - номер главы
 - `chapter_name` - название главы
 - `text` - текст.
 
 ```{r}
-data <- read_csv('corpus_chapters.csv') |> 
+data <- read_csv('corpus_chapters.csv', show_col_types = FALSE) |> 
   mutate(part = if_else(chapter_number <= 16, "первая", "вторая"), .before = 1) # добавление колонки с частью книги
 head(data)
 ```
@@ -43,14 +47,15 @@ head(data)
 Токенизация, лемматизация
 
 ```{r}
-# загружаем предобученную модель для русского языка (модель сохраняется локально)
+# загружаем предобученную модель для русского языка (модель предварительно сохранена локально)
+# ud_model <- udpipe_download_model(language = "russian") --- первое скачивание
 ud_model <- udpipe_load_model("russian-gsd-ud-2.5-191206.udpipe")
 ```
 
 ```{r}
 # стоп-слова
 stopwords <- stopwords("ru", source = "snowball")
-m_words <- c("это", "все", "свой", "который", "еще", "чтоб", "вот", "как", "то", "тут", "или", "того", "этот", "тот", "очень", "весь", "стать")
+m_words <- c("это", "все", "свой", "который", "еще", "чтоб", "вот", "как", "то", "тут", "или", "того", "этот", "тот", "очень", "весь", "стать", "говорить", "ответить")
 stop_list <- unique(c(stopwords, m_words))
 
 # фильтрация
@@ -72,7 +77,7 @@ frequencies_1 <- token_words |> count(lemma, sort = TRUE)
 frequencies_1
 ```
 
-Визуализируем **топ-20 слов**
+Визуализируем **топ-20 слов** (выделяя имена персонажей)
 
 ```{r}
 # список персонажей для выделения
@@ -86,7 +91,7 @@ frequencies_1 |>
   geom_col(color = "darkred", show.legend = FALSE) +
   coord_flip() +
   scale_fill_manual(values = c("персонаж" = "firebrick", "другое" = "lightcoral")) +
-  labs(x = NULL, y = "Частота", title = "20 слов по корпусу") +
+  labs(x = NULL, y = "Частота", title = "Топ-20 слов по корпусу") +
   theme_minimal(base_family = "serif") +
   theme(
     plot.title = element_text(size = 14, face = "bold", hjust = 0.5, color = "darkred"),
@@ -106,9 +111,37 @@ frequencies_2 |>
   ungroup()
 ```
 
+Визуализация топ-1 слова в каждой главе
+
+```{r}
+frequencies_2 |> 
+  group_by(chapter_number, chapter_name) |>
+  slice_max(n, n = 1) |>
+  ungroup() |>
+  mutate(row_color = if_else(row_number() %% 2 == 0, "lightcoral", "firebrick")) |>
+  ggplot(aes(x = reorder(chapter_name, chapter_number), y = n, fill = row_color)) +
+  geom_col(color = "brown", alpha = 0.8, show.legend = FALSE) +
+  geom_text(aes(label = lemma), 
+            position = position_stack(vjust = 0.5), 
+            size = 3, 
+            color = "white",
+            fontface = "bold") +
+  scale_fill_identity() +
+  coord_flip() +
+  labs(x = "Глава", y = "Частота", 
+       title = "Самое частотное слово в каждой главе") +
+  theme_minimal(base_family = "serif") +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5, color = "darkred"),
+    axis.text = element_text(size = 9, color = "darkred"),
+    axis.title = element_text(size = 11, color = "darkred"),
+    axis.text.y = element_text(size = 8)
+  )
+```
+
 ## Регулярные выражения 
 
-Подсчет частоты упоминания **всех персонажей** по главам
+Подсчет частоты упоминания **всех персонажей** по главам + нормированная частота на 1000 слов текста
 
 ```{r}
 persons <- c(
@@ -236,8 +269,6 @@ ggplot(key_lr_top, aes(x = fct_reorder(feature, G2), y = G2, fill = type)) +
 ## Семантическая сеть
 
 ```{r warning=FALSE}
-# семантическая сеть
-
 bigrams <- data |>
   mutate(text = str_replace_all(text, "ё", "е")) |>
   unnest_tokens(bigram, text, token = "ngrams", n = 2) |>
@@ -278,8 +309,127 @@ test_thresholds()
 g <- graph_from_data_frame(edges, directed = FALSE)
 set.seed(30)
 ggraph(g, layout = "fr") +
-  geom_edge_link(alpha=.3) +
-  geom_node_point() +
-  geom_node_text(aes(label = name), repel = TRUE, size = 3) +
-  labs(title = "Семантическая сеть биграмм")
+  geom_edge_link(alpha = .3, color = "brown", width = 0.8) + 
+  geom_node_point(color = "firebrick", size = 4, alpha = 0.7) + 
+  geom_node_text(aes(label = name), repel = TRUE, size = 3, color = "darkred") +
+  labs(title = "Семантическая сеть биграмм") +
+  theme_void()
+```
+
+## Тематическое моделирование (LDA)
+
+Подготовка данных и построение модели LDA
+
+```{r message=FALSE}
+dtm_tbl <- token_words |> 
+  filter(!is.na(lemma)) |> 
+  count(document = as.character(chapter_number), term = lemma, sort = TRUE)
+
+# преобразуем в объект типа Document-Term-Matrix
+dtm <- dtm_tbl |> 
+  cast_dtm(document, term, n)
+
+# параметры LDA
+k <- 10 
+seed <- 1234
+control <- list(seed = seed)
+
+# Обучаем модель
+lda_model <- LDA(dtm, k = k, method = "Gibbs", control = control)
+```
+
+Топ-термы по темам (beta)
+
+```{r}
+topics_beta <- tidy(lda_model, matrix = "beta")
+
+top_n <- 10
+top_terms <- topics_beta |>
+  group_by(topic) |>
+  slice_max(beta, n = top_n) |>
+  ungroup() |>
+  arrange(topic, -beta)
+
+top_terms |>
+  group_by(topic) |>
+  summarize(terms = paste(term, collapse = ", ")) |>
+  ungroup()
+```
+
+Визуализация: топ-термы по темам (гистограммы)
+
+```{r}
+red_palette <- c("lightcoral", "indianred", "brown", "firebrick", "darkred", 
+                 "maroon", "coral", "tomato", "orangered", "red3")
+top_terms |>
+  mutate(term = reorder_within(term, beta, topic)) |>
+  ggplot(aes(x = term, y = beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip() +
+  scale_x_reordered() +
+  scale_fill_manual(values = red_palette) + 
+  labs(title = "Топ-слова по темам",
+       x = NULL, y = "Вероятность (beta)") +
+  theme_minimal(base_family = "serif")
+```
+
+Распределение тем по главам
+
+```{r}
+topics_gamma <- tidy(lda_model, matrix = "gamma") |>
+  group_by(document) |>
+  slice_max(gamma, n = 1) |>
+  ungroup() |>
+  mutate(document = as.numeric(document))
+
+# Добавляем информацию о главах
+chapters_info <- data |>
+  select(chapter_number, chapter_name, part) |>
+  distinct() |> 
+  mutate(document = as.character(chapter_number))
+
+topics_with_chapters <- topics_gamma |>
+  left_join(chapters_info, by = c("document" = "chapter_number"))
+
+topics_with_chapters |> select(part, document, chapter_name, topic, gamma)
+```
+
+Визуализация доминирующих тем по главам
+
+```{r}
+ggplot(topics_with_chapters, aes(x = factor(document), y = gamma, fill = factor(topic))) +
+  geom_col() +
+  facet_grid(part ~ ., scales = "free", space = "free") +
+  scale_fill_manual(values = red_palette, name = "Тема") +
+  labs(title = "Доминирующие темы по главам",
+       x = "Номер главы", y = "Доля темы", fill = "Тема") +
+  theme_minimal(base_family = "serif") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+**Интерпретация тем на основе топ-слов и принадлежности к главам**
+
+```{r}
+topics_interpretation <- top_terms |>
+  group_by(topic) |>
+  summarise(
+    top_words = paste(head(term, 10), collapse = ", "),  # топ-10 слов для каждой темы
+    .groups = "drop"
+  )
+
+# Примеры глав для каждой темы
+example_chapters <- topics_with_chapters |>
+  group_by(topic) |>
+  slice_max(gamma, n = 3) |>
+  select(topic, chapter_number = document, chapter_name, gamma) |>
+  arrange(topic, desc(gamma))
+
+# Все данные
+interpretation_summary <- example_chapters |>
+  left_join(topics_interpretation, by = "topic") |>
+  select(topic, top_words, chapter_number, chapter_name, gamma) |>
+  arrange(topic, desc(gamma))
+
+interpretation_summary
 ```
